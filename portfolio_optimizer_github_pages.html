@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Portfolio Optimizer (GitHub Pages Ready)</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    :root{--bg:#0f172a;--card:#0b1220;--muted:#9aa4bf;--accent:#7c3aed}
+    *{box-sizing:border-box}
+    body{font-family:Inter,system-ui,Segoe UI,Roboto,Arial; margin:0; padding:24px; background:linear-gradient(180deg,#031028 0%,#071029 100%); color:#e6eef8}
+    .container{max-width:1100px;margin:0 auto}
+    header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:18px}
+    h1{font-size:20px;margin:0}
+    .card{background:rgba(255,255,255,0.03);padding:18px;border-radius:12px;box-shadow:0 6px 18px rgba(2,6,23,.6);}
+    .grid{display:grid;grid-template-columns:1fr 420px;gap:18px}
+    label{display:block;font-size:13px;color:var(--muted);margin-bottom:6px}
+    input[type=file]{color:var(--muted)}
+    button{background:var(--accent);border:0;color:white;padding:10px 12px;border-radius:8px;cursor:pointer}
+    .small{font-size:13px;color:var(--muted)}
+    .controls{display:flex;gap:8px;align-items:center}
+    canvas{background:transparent}
+    pre{white-space:pre-wrap;font-size:13px;color:#cfe1ff}
+    .result{margin-top:12px}
+    table{width:100%;border-collapse:collapse;margin-top:8px}
+    td,th{padding:8px;border-bottom:1px solid rgba(255,255,255,.03);text-align:left}
+    .pie-wrap{height:260px}
+    footer{margin-top:18px;color:var(--muted);font-size:13px}
+    @media (max-width:900px){.grid{grid-template-columns:1fr;}.pie-wrap{height:220px}}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Portfolio Optimizer — GitHub Pages Ready</h1>
+      <div class="small">Frontend-only (upload CSV) · Monte Carlo optimizer</div>
+    </header>
+
+    <div class="grid">
+      <div class="card">
+        <section>
+          <label>Upload historical prices CSV (format: Date, Ticker1, Ticker2,... with header)</label>
+          <input id="file" type="file" accept=".csv" />
+          <div class="small" style="margin-top:8px">Or click <button id="sampleBtn">Load sample data</button></div>
+        </section>
+
+        <section style="margin-top:14px">
+          <label>Monte Carlo settings</label>
+          <div style="display:flex;gap:8px;align-items:center">
+            <div>
+              <div class="small">Trials</div>
+              <input id="trials" type="number" value="5000" min="500" max="20000" style="width:110px;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,.04);background:transparent;color:inherit" />
+            </div>
+            <div>
+              <div class="small">Risk-free rate (%)</div>
+              <input id="rf" type="number" value="3" step="0.1" style="width:120px;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,.04);background:transparent;color:inherit" />
+            </div>
+            <div class="controls" style="margin-left:auto">
+              <button id="run">Run Optimization</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="result">
+          <div id="status" class="small">Status: Waiting for data upload.</div>
+          <div id="metrics" style="margin-top:10px"></div>
+          <div id="weights"></div>
+        </section>
+      </div>
+
+      <div>
+        <div class="card" style="margin-bottom:12px">
+          <label>Efficient frontier (Return vs Risk)</label>
+          <canvas id="efChart" height="260"></canvas>
+        </div>
+
+        <div class="card">
+          <label>Optimal portfolio (weights)</label>
+          <div class="pie-wrap"><canvas id="pieChart"></canvas></div>
+          <div id="tableWrap"></div>
+        </div>
+      </div>
+    </div>
+
+    <footer class="card" style="margin-top:18px">
+      <strong>How to use</strong>
+      <ol style="margin:8px 0 0 18px;padding:0;color:var(--muted)">
+        <li>Prepare CSV with columns: Date, <em>each ticker's adjusted close</em>. One row per date (oldest → newest).</li>
+        <li>Upload file or load sample, set trials and risk-free rate, then click <em>Run Optimization</em>.</li>
+        <li>Export weights by copying the table. This is frontend-only and safe to host on GitHub Pages.</li>
+      </ol>
+      <div style="margin-top:8px;color:var(--muted)">Ready to deploy: push this <code>index.html</code> to a repo and enable GitHub Pages.</div>
+    </footer>
+  </div>
+
+<script>
+// --- Utilities ---
+function parseCSV(text){
+  const lines = text.trim().split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
+  if(lines.length<2) throw new Error('CSV must have header + at least one data row');
+  const header = lines[0].split(/,|;|\t/).map(s=>s.trim());
+  const rows = lines.slice(1).map(r=>r.split(/,|;|\t/).map(s=>s.trim()));
+  const data = {};
+  header.forEach((h,i)=> data[h]=[]);
+  rows.forEach(r=>{ r.forEach((v,i)=>{ const key=header[i]; data[key].push(v); })});
+  return {header, data};
+}
+
+function toNumberArray(arr){ return arr.map(x=>{const n=parseFloat(x); return isNaN(n)?null:n}); }
+
+function transpose(m){ return m[0].map((_,i)=>m.map(row=>row[i])); }
+
+function mean(a){ return a.reduce((s,v)=>s+v,0)/a.length }
+
+function std(a, meanVal){ const m = meanVal!==undefined? meanVal : mean(a); return Math.sqrt(a.reduce((s,v)=>s+Math.pow(v-m,2),0)/(a.length-1)) }
+
+// compute daily returns from price series (assumes oldest->newest)
+function dailyReturns(prices){ const ret=[]; for(let i=1;i<prices.length;i++){ const p0=prices[i-1], p1=prices[i]; if(p0==null||p1==null){ ret.push(null); } else { ret.push((p1-p0)/p0); }} return ret; }
+
+function cleanSeries(series){ return series.filter(v=>v!=null && isFinite(v)); }
+
+// covariance matrix
+function covMatrix(returnsMatrix){
+  const n = returnsMatrix.length; // number of assets
+  const T = returnsMatrix[0].length;
+  const means = returnsMatrix.map(r=>mean(r));
+  const S = Array.from({length:n},()=>Array.from({length:n},()=>0));
+  for(let i=0;i<n;i++) for(let j=0;j<n;j++){
+    let s=0; for(let t=0;t<T;t++) s += (returnsMatrix[i][t]-means[i])*(returnsMatrix[j][t]-means[j]);
+    S[i][j] = s/(T-1);
+  }
+  return {S, means};
+}
+
+// Monte Carlo portfolios
+function randomWeights(n){ let w = Array.from({length:n},()=>Math.random()); const s = w.reduce((a,b)=>a+b,0); return w.map(x=>x/s); }
+function portfolioStats(weights, means, cov, tradingDays=252){
+  // weights: array, means: daily means array, cov: daily cov matrix
+  const portMeanDaily = weights.reduce((s,w,i)=>s + w*means[i],0);
+  // variance = w^T * cov * w
+  let variance = 0; for(let i=0;i<weights.length;i++) for(let j=0;j<weights.length;j++) variance += weights[i]*weights[j]*cov[i][j];
+  const portStdDaily = Math.sqrt(variance);
+  const annReturn = portMeanDaily * tradingDays;
+  const annVol = portStdDaily * Math.sqrt(tradingDays);
+  return {annReturn, annVol};
+}
+
+// --- UI & logic ---
+let globalPrices = null; // object {tickers:[], prices: {ticker: [price...]}}
+let efChart, pieChart;
+const status = document.getElementById('status');
+const fileInput = document.getElementById('file');
+const runBtn = document.getElementById('run');
+const sampleBtn = document.getElementById('sampleBtn');
+
+fileInput.addEventListener('change', async (e)=>{
+  const f = e.target.files[0]; if(!f) return; status.textContent = 'Status: Loading CSV...';
+  const txt = await f.text(); try{ loadCSV(txt); status.textContent='Status: CSV loaded. Click Run Optimization.' }catch(err){ status.textContent = 'Status: Error parsing CSV: '+err.message }
+});
+
+sampleBtn.addEventListener('click', ()=>{
+  status.textContent='Status: Loading sample data...';
+  // small synthetic sample (prices for 4 tickers)
+  const csv = `Date,AAPL,MSFT,GOOGL,AMZN
+2024-01-02,125,240,101,85
+2024-01-03,127,242,102,86
+2024-01-04,124,239,100,88
+2024-01-05,128,244,103,90
+2024-01-08,130,246,105,92
+2024-01-09,129,245,104,91
+2024-01-10,131,247,106,93
+2024-01-11,133,250,107,95
+2024-01-12,132,249,106,94
+2024-01-15,134,251,108,96
+`;
+  loadCSV(csv);
+  status.textContent='Status: Sample loaded. Click Run Optimization.';
+});
+
+function loadCSV(text){
+  const parsed = parseCSV(text);
+  const header = parsed.header; const data = parsed.data;
+  // header[0] assumed 'Date'
+  const tickers = header.slice(1);
+  const prices = {};
+  tickers.forEach(t=> prices[t] = toNumberArray(data[t] || []));
+  // simple validity check: all series should be same length
+  const lengths = tickers.map(t=>prices[t].length);
+  if(new Set(lengths).size !== 1) throw new Error('All ticker columns must have same number of rows');
+  globalPrices = {tickers, prices};
+}
+
+runBtn.addEventListener('click', ()=>{
+  if(!globalPrices){ status.textContent='Status: No data loaded — upload CSV or load sample.'; return; }
+  const trials = parseInt(document.getElementById('trials').value) || 3000;
+  const rf = parseFloat(document.getElementById('rf').value || '0')/100;
+  status.textContent = 'Status: Preparing returns...';
+  try{ runOptimization(globalPrices, trials, rf); }catch(err){ status.textContent = 'Error: '+err.message }
+});
+
+function runOptimization(pricedata, trials, rf){
+  const tickers = pricedata.tickers;
+  const series = tickers.map(t=>pricedata.prices[t]);
+  // compute daily returns (assume oldest->newest)
+  const returns = series.map(s=>cleanSeries(dailyReturns(s)));
+  // ensure same length across returns (drop leading nulls if any)
+  const minLen = Math.min(...returns.map(r=>r.length));
+  const trimmed = returns.map(r=>r.slice(r.length-minLen));
+  const {S, means} = covMatrix(trimmed);
+
+  status.textContent = 'Status: Running Monte Carlo ('+trials+' trials)...';
+
+  const results = [];
+  let bestSharpe = -Infinity, bestIdx=-1, bestMinVolIdx=-1;
+  for(let k=0;k<trials;k++){
+    const w = randomWeights(tickers.length);
+    const {annReturn, annVol} = portfolioStats(w, means, S);
+    const sharpe = (annReturn - rf)/annVol;
+    results.push({w, annReturn, annVol, sharpe});
+    if(sharpe>bestSharpe){ bestSharpe=sharpe; bestIdx=k }
+  }
+  // find min vol
+  let minVol = Infinity; for(let i=0;i<results.length;i++){ if(results[i].annVol<minVol){ minVol = results[i].annVol; bestMinVolIdx = i } }
+
+  status.textContent = 'Status: Optimization complete.';
+  drawFrontier(results, results[bestIdx], results[bestMinVolIdx], tickers);
+}
+
+function drawFrontier(results, bestSharpeObj, bestMinVolObj, tickers){
+  // prepare data for chart
+  const dots = results.map(r=>({x:r.annVol, y:r.annReturn, r:3, s:r.sharpe}));
+  const efCtx = document.getElementById('efChart').getContext('2d');
+  if(efChart) efChart.destroy();
+  efChart = new Chart(efCtx, {
+    type: 'scatter',
+    data: {
+      datasets: [
+        {label:'Random portfolios',data:dots, pointRadius:3,backgroundColor:'rgba(124,58,237,0.6)'.replace(')','')},
+        {label:'Max Sharpe',data:[{x:bestSharpeObj.annVol,y:bestSharpeObj.annReturn}],pointRadius:8,backgroundColor:'rgba(34,197,94,1)'},
+        {label:'Min Vol',data:[{x:bestMinVolObj.annVol,y:bestMinVolObj.annReturn}],pointRadius:8,backgroundColor:'rgba(249,115,22,1)'}
+      ]
+    },
+    options:{
+      plugins:{legend:{labels:{color:'#cfe1ff'}}},
+      scales:{x:{title:{display:true,text:'Annualized Volatility (σ)',color:'#cfe1ff'},ticks:{color:'#cfe1ff'}},y:{title:{display:true,text:'Annualized Return',color:'#cfe1ff'},ticks:{color:'#cfe1ff'}}}
+    }
+  });
+
+  // show weights pie
+  const weights = bestSharpeObj.w;
+  const labels = tickers;
+  const pieCtx = document.getElementById('pieChart').getContext('2d');
+  if(pieChart) pieChart.destroy();
+  pieChart = new Chart(pieCtx, {type:'pie',data:{labels, datasets:[{data:weights}]}, options:{plugins:{legend:{position:'bottom'}}}});
+
+  // metrics and table
+  const metrics = document.getElementById('metrics');
+  metrics.innerHTML = `<div class="small">Max Sharpe — Return: ${(bestSharpeObj.annReturn*100).toFixed(2)}% · Volatility: ${(bestSharpeObj.annVol*100).toFixed(2)}% · Sharpe: ${bestSharpeObj.sharpe.toFixed(3)}</div>`;
+
+  const tableWrap = document.getElementById('tableWrap');
+  let html = '<table><thead><tr><th>Ticker</th><th>Weight</th></tr></thead><tbody>';
+  tickers.forEach((t,i)=>{ html += `<tr><td>${t}</td><td>${(weights[i]*100).toFixed(2)}%</td></tr>` });
+  html += '</tbody></table>';
+  tableWrap.innerHTML = html;
+}
+</script>
+</body>
+</html>
